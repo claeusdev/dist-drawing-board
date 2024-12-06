@@ -4,11 +4,99 @@ import redis from '../config/redis.js';
 import serviceDiscovery from '../config/service-discovery.js';
 
 class SocketServer {
-  constructor() {
+  constructor(port) {
+    this.port = port;
     this.producer = null;
     this.wss = null;
     this.rooms = new Map();
+    this.sessionStore = new Map();
+    this.app = express();
+    this.server = http.createServer(this.app);
   }
+
+  setupHealthCheck() {
+    // Health check endpoint
+    this.app.get('/health', (req, res) => {
+      const health = {
+        status: 'OK',
+        timestamp: new Date(),
+        serverId: process.pid,
+        connections: this.wss?.clients.size || 0,
+        roomCount: this.rooms.size,
+        uptime: process.uptime()
+      };
+
+      // Check Kafka connection
+      if (!this.producer?.isConnected()) {
+        health.status = 'DEGRADED';
+        health.kafkaStatus = 'DISCONNECTED';
+      }
+
+      // Check Redis connection
+      redis.ping().then(() => {
+        health.redisStatus = 'CONNECTED';
+      }).catch(() => {
+        health.status = 'DEGRADED';
+        health.redisStatus = 'DISCONNECTED';
+      });
+
+      res.json(health);
+    });
+
+    // Liveness probe
+    this.app.get('/live', (req, res) => {
+      res.status(200).send('OK');
+    });
+
+    // Readiness probe
+    this.app.get('/ready', async (req, res) => {
+      try {
+        await redis.ping();
+        if (this.producer?.isConnected()) {
+          res.status(200).send('OK');
+        } else {
+          res.status(503).send('Not Ready');
+        }
+      } catch (error) {
+        res.status(503).send('Not Ready');
+      }
+    });
+  }
+
+
+  setupSessionReplication() {
+    // Subscribe to session replication channel
+    const subscriber = redis.duplicate();
+    subscriber.subscribe('session:replication', (err) => {
+      if (err) console.error('Error subscribing to session replication:', err);
+    });
+
+    subscriber.on('message', (channel, message) => {
+      if (channel === 'session:replication') {
+        try {
+          const session = JSON.parse(message);
+          if (session.serverId !== process.pid) {
+            this.sessionStore.set(session.userId, session);
+          }
+        } catch (error) {
+          console.error('Error processing replicated session:', error);
+        }
+      }
+    });
+  }
+
+  async replicateSession(userId, sessionData) {
+    try {
+      await redis.publish('session:replication', JSON.stringify({
+        serverId: process.pid,
+        userId,
+        ...sessionData
+      }));
+    } catch (error) {
+      console.error('Error replicating session:', error);
+    }
+  }
+
 
   async start() {
     try {
@@ -42,6 +130,10 @@ class SocketServer {
       ws.roomId = null;
       ws.userId = null;
 
+      ws.on('pong', () => {
+        ws.isAlive = true;
+      });
+
       ws.on('message', async (data) => {
         try {
           const message = JSON.parse(data.toString());
@@ -59,6 +151,21 @@ class SocketServer {
       ws.on('error', (error) => {
         console.error('WebSocket error:', error);
       });
+    });
+
+    // Setup heartbeat interval
+    const interval = setInterval(() => {
+      this.wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) {
+          return ws.terminate();
+        }
+        ws.isAlive = false;
+        ws.ping();
+      });
+    }, 30000);
+
+    this.wss.on('close', () => {
+      clearInterval(interval);
     });
   }
 
@@ -189,6 +296,12 @@ class SocketServer {
       console.error('Error handling join:', error);
       this.sendError(ws, 'Failed to join room');
     }
+
+    // Add session replication
+    await this.replicateSession(data.userId, {
+      roomId: data.roomId,
+      joinedAt: Date.now()
+    });
   }
   async handleLeave(ws) {
     if (ws.roomId) {
@@ -260,23 +373,30 @@ class SocketServer {
   }
 }
 
-// Create and start server
-const server = new SocketServer();
-server.start().catch(error => {
-  console.error('Failed to start server:', error);
-  process.exit(1);
-});
+// Start the server based on cluster configuration
+if (cluster.isPrimary) {
+  console.log(`Primary ${process.pid} is running`);
 
-// Handle process termination
-process.on('SIGINT', async () => {
-  console.log('Shutting down...');
-  if (server.producer) {
-    await server.producer.disconnect();
+  // Fork workers based on CPU cores
+  const numCPUs = cpus().length;
+  for (let i = 0; i < numCPUs; i++) {
+    cluster.fork();
   }
-  if (server.wss) {
-    server.wss.close();
-  }
-  process.exit(0);
-});
+
+  cluster.on('exit', (worker, code, signal) => {
+    console.log(`Worker ${worker.process.pid} died`);
+    // Fork a new worker if one dies
+    cluster.fork();
+  });
+} else {
+  // Workers can share any TCP connection
+  // In this case, it's a WebSocket server
+  const port = parseInt(process.env.PORT || '8080') + cluster.worker.id - 1;
+  const server = new SocketServer(port);
+  server.start().catch(error => {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  });
+}
 
 export default SocketServer;
