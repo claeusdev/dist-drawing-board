@@ -1,5 +1,52 @@
 version: '3.8'
 services:
+  haproxy:
+    image: haproxy:2.4
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - websocket1
+      - websocket2
+      - websocket3
+
+  websocket1:
+    build: .
+    environment:
+      - PORT=8081
+      - KAFKA_BROKERS=kafka:9092
+      - REDIS_HOST=redis-master
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  websocket2:
+    build: .
+    environment:
+      - PORT=8082
+      - KAFKA_BROKERS=kafka:9092
+      - REDIS_HOST=redis-master
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  websocket3:
+    build: .
+    environment:
+      - PORT=8083
+      - KAFKA_BROKERS=kafka:9092
+      - REDIS_HOST=redis-master
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   zookeeper:
     image: confluentinc/cp-zookeeper:latest
     environment:

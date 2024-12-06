@@ -21,7 +21,7 @@ class SocketServer {
       console.log('Connected to Kafka');
 
       // Start WebSocket server
-      this.wss = new WebSocketServer({ 
+      this.wss = new WebSocketServer({
         port: process.env.PORT || 8080,
         perMessageDeflate: false
       });
@@ -37,7 +37,7 @@ class SocketServer {
   setupWebSocketHandlers() {
     this.wss.on('connection', (ws) => {
       console.log('Client connected');
-      
+
       ws.isAlive = true;
       ws.roomId = null;
       ws.userId = null;
@@ -83,7 +83,7 @@ class SocketServer {
     }
   }
 
-async handleDraw(ws, data) {
+  async handleDraw(ws, data) {
     if (!ws.roomId || !ws.userId) {
       return this.sendError(ws, 'Not joined to a room');
     }
@@ -103,7 +103,7 @@ async handleDraw(ws, data) {
       const redisKey = `room:${ws.roomId}:state`;
       const eventKey = `draw:${drawEvent.timestamp}`;
       console.log('Storing in Redis:', redisKey, eventKey);
-      
+
       await redis.hset(
         redisKey,
         eventKey,
