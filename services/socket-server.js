@@ -1,33 +1,49 @@
 import WebSocket, { WebSocketServer } from 'ws';
-import { kafka, createTopics } from '../config/kafka.js';
-import redis from '../config/redis.js';
-import serviceDiscovery from '../config/service-discovery.js';
+import { kafka } from '../config/kafka.js';
+import { redis } from '../config/redis.js';
 
 class SocketServer {
   constructor() {
     this.producer = null;
     this.wss = null;
+    this.port = process.env.PORT || 8080;
     this.rooms = new Map();
+  }
+
+  async connectKafka(retries = 5, delay = 5000) {
+    for (let i = 0; i < retries; i++) {
+      try {
+        console.log(`Attempting to connect to Kafka (attempt ${i + 1}/${retries})`);
+        this.producer = kafka.producer();
+        await this.producer.connect();
+        console.log('Successfully connected to Kafka');
+        return;
+      } catch (error) {
+        console.error(`Failed to connect to Kafka (attempt ${i + 1}/${retries}):`, error.message);
+        if (i < retries - 1) {
+          console.log(`Retrying in ${delay / 1000} seconds...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          throw error;
+        }
+      }
+    }
   }
 
   async start() {
     try {
-      // Ensure Kafka topics exist
-      await createTopics();
+      // Wait for Kafka connection
+      await this.connectKafka();
 
-      // Initialize Kafka producer
-      this.producer = kafka.producer();
-      await this.producer.connect();
-      console.log('Connected to Kafka');
-
-      // Start WebSocket server
-      this.wss = new WebSocketServer({ 
-        port: process.env.PORT || 8080,
+      // Initialize WebSocket server
+      this.wss = new WebSocketServer({
+        port: this.port,
         perMessageDeflate: false
       });
 
+      console.log(`WebSocket server is listening on port ${this.port}`);
+
       this.setupWebSocketHandlers();
-      console.log(`WebSocket server started on port ${process.env.PORT || 8080}`);
     } catch (error) {
       console.error('Error starting server:', error);
       throw error;
@@ -37,10 +53,14 @@ class SocketServer {
   setupWebSocketHandlers() {
     this.wss.on('connection', (ws) => {
       console.log('Client connected');
-      
+
       ws.isAlive = true;
       ws.roomId = null;
       ws.userId = null;
+
+      ws.on('pong', () => {
+        ws.isAlive = true;
+      });
 
       ws.on('message', async (data) => {
         try {
@@ -59,6 +79,21 @@ class SocketServer {
       ws.on('error', (error) => {
         console.error('WebSocket error:', error);
       });
+    });
+
+    // Setup heartbeat interval
+    const interval = setInterval(() => {
+      this.wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) {
+          return ws.terminate();
+        }
+        ws.isAlive = false;
+        ws.ping();
+      });
+    }, 30000);
+
+    this.wss.on('close', () => {
+      clearInterval(interval);
     });
   }
 
@@ -80,53 +115,6 @@ class SocketServer {
     } catch (error) {
       console.error('Error in handleMessage:', error);
       this.sendError(ws, 'Error processing message');
-    }
-  }
-
-async handleDraw(ws, data) {
-    if (!ws.roomId || !ws.userId) {
-      return this.sendError(ws, 'Not joined to a room');
-    }
-
-    console.log('Received draw event:', data);
-
-    const drawEvent = {
-      type: 'draw',
-      userId: ws.userId,
-      roomId: ws.roomId,
-      coordinates: data.coordinates,
-      timestamp: Date.now()
-    };
-
-    try {
-      // Store in Redis
-      const redisKey = `room:${ws.roomId}:state`;
-      const eventKey = `draw:${drawEvent.timestamp}`;
-      console.log('Storing in Redis:', redisKey, eventKey);
-      
-      await redis.hset(
-        redisKey,
-        eventKey,
-        JSON.stringify(drawEvent.coordinates)
-      );
-      console.log('Successfully stored in Redis');
-
-      // Send to Kafka
-      console.log('Sending to Kafka');
-      await this.producer.send({
-        topic: 'whiteboard-events',
-        messages: [{
-          key: String(ws.roomId),
-          value: JSON.stringify(drawEvent)
-        }]
-      });
-      console.log('Successfully sent to Kafka');
-
-      // Broadcast to room
-      this.broadcastToRoom(ws.roomId, drawEvent, ws);
-    } catch (error) {
-      console.error('Error processing draw event:', error);
-      this.sendError(ws, 'Failed to process draw event');
     }
   }
 
@@ -190,31 +178,61 @@ async handleDraw(ws, data) {
       this.sendError(ws, 'Failed to join room');
     }
   }
-  async handleLeave(ws) {
+
+  async handleDraw(ws, data) {
+    if (!ws.roomId || !ws.userId) {
+      return this.sendError(ws, 'Not joined to a room');
+    }
+
+    console.log('Received draw event:', data);
+
+    const drawEvent = {
+      type: 'draw',
+      userId: ws.userId,
+      roomId: ws.roomId,
+      coordinates: data.coordinates,
+      timestamp: Date.now()
+    };
+
+    try {
+      // Store in Redis
+      const redisKey = `room:${ws.roomId}:state`;
+      const eventKey = `draw:${drawEvent.timestamp}`;
+      console.log('Storing in Redis:', redisKey, eventKey);
+
+      await redis.hset(
+        redisKey,
+        eventKey,
+        JSON.stringify(drawEvent.coordinates)
+      );
+      console.log('Successfully stored in Redis');
+
+      // Send to Kafka
+      console.log('Sending to Kafka');
+      await this.producer.send({
+        topic: 'whiteboard-events',
+        messages: [{
+          key: String(ws.roomId),
+          value: JSON.stringify(drawEvent)
+        }]
+      });
+      console.log('Successfully sent to Kafka');
+
+      // Broadcast to room
+      this.broadcastToRoom(ws.roomId, drawEvent, ws);
+    } catch (error) {
+      console.error('Error processing draw event:', error);
+      this.sendError(ws, 'Failed to process draw event');
+    }
+  }
+
+  handleLeave(ws) {
     if (ws.roomId) {
       const room = this.rooms.get(ws.roomId);
       if (room) {
         room.delete(ws);
         if (room.size === 0) {
           this.rooms.delete(ws.roomId);
-        }
-
-        // Send leave event to Kafka
-        try {
-          await this.producer.send({
-            topic: 'whiteboard-events',
-            messages: [{
-              key: String(ws.roomId),
-              value: JSON.stringify({
-                type: 'leave',
-                roomId: ws.roomId,
-                userId: ws.userId,
-                timestamp: Date.now()
-              })
-            }]
-          });
-        } catch (error) {
-          console.error('Error sending leave event to Kafka:', error);
         }
       }
     }
@@ -265,18 +283,6 @@ const server = new SocketServer();
 server.start().catch(error => {
   console.error('Failed to start server:', error);
   process.exit(1);
-});
-
-// Handle process termination
-process.on('SIGINT', async () => {
-  console.log('Shutting down...');
-  if (server.producer) {
-    await server.producer.disconnect();
-  }
-  if (server.wss) {
-    server.wss.close();
-  }
-  process.exit(0);
 });
 
 export default SocketServer;
