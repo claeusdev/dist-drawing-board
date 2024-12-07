@@ -10,42 +10,66 @@ services:
       - websocket1
       - websocket2
       - websocket3
+    networks:
+      - whiteboard_net
 
   websocket1:
     build: .
     environment:
       - PORT=8081
-      - KAFKA_BROKERS=kafka:9092
       - REDIS_HOST=redis-master
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - KAFKA_BROKERS=kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis-master:
+        condition: service_started
+    networks:
+      - whiteboard_net
 
   websocket2:
     build: .
     environment:
       - PORT=8082
-      - KAFKA_BROKERS=kafka:9092
       - REDIS_HOST=redis-master
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - KAFKA_BROKERS=kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis-master:
+        condition: service_started
+    networks:
+      - whiteboard_net
 
   websocket3:
     build: .
     environment:
       - PORT=8083
-      - KAFKA_BROKERS=kafka:9092
       - REDIS_HOST=redis-master
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - KAFKA_BROKERS=kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis-master:
+        condition: service_started
+    networks:
+      - whiteboard_net
+
+  redis-master:
+      image: redis:latest
+      container_name: redis-master  # Explicitly set container name
+      ports:
+        - "6379:6379"
+      networks:
+        - whiteboard_net
+      volumes:
+        - redis_data:/data
+      command: redis-server --appendonly yes
+      healthcheck:
+        test: ["CMD", "redis-cli", "ping"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
 
   zookeeper:
     image: confluentinc/cp-zookeeper:latest
@@ -54,37 +78,38 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
+    networks:
+      - whiteboard_net
+    healthcheck:
+      test: echo srvr | nc localhost 2181 || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   kafka:
     image: confluentinc/cp-kafka:latest
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     ports:
       - "9092:9092"
+      - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://:9092,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-
-  redis-master:
-    image: redis:latest
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes
-
-  mongodb:
-    image: mongo:latest
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongodb_data:/data/db
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    networks:
+      - whiteboard_net
+    healthcheck:
+      test: kafka-topics --bootstrap-server localhost:9092 --list || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
   prometheus:
     image: prom/prometheus:latest
@@ -92,6 +117,8 @@ services:
       - "9090:9090"
     volumes:
       - ./monitoring/prom.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - whiteboard_net
 
   grafana:
     image: grafana/grafana:latest
@@ -99,7 +126,12 @@ services:
       - "3000:3000"
     depends_on:
       - prometheus
+    networks:
+      - whiteboard_net
+
+networks:
+  whiteboard_net:
+    driver: bridge
 
 volumes:
   redis_data:
-  mongodb_data:

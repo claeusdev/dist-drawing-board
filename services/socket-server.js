@@ -1,121 +1,49 @@
 import WebSocket, { WebSocketServer } from 'ws';
-import { kafka, createTopics } from '../config/kafka.js';
-import redis from '../config/redis.js';
-import serviceDiscovery from '../config/service-discovery.js';
+import { kafka } from '../config/kafka.js';
+import { redis } from '../config/redis.js';
 
 class SocketServer {
-  constructor(port) {
-    this.port = port;
+  constructor() {
     this.producer = null;
     this.wss = null;
+    this.port = process.env.PORT || 8080;
     this.rooms = new Map();
-    this.sessionStore = new Map();
-    this.app = express();
-    this.server = http.createServer(this.app);
   }
 
-  setupHealthCheck() {
-    // Health check endpoint
-    this.app.get('/health', (req, res) => {
-      const health = {
-        status: 'OK',
-        timestamp: new Date(),
-        serverId: process.pid,
-        connections: this.wss?.clients.size || 0,
-        roomCount: this.rooms.size,
-        uptime: process.uptime()
-      };
-
-      // Check Kafka connection
-      if (!this.producer?.isConnected()) {
-        health.status = 'DEGRADED';
-        health.kafkaStatus = 'DISCONNECTED';
-      }
-
-      // Check Redis connection
-      redis.ping().then(() => {
-        health.redisStatus = 'CONNECTED';
-      }).catch(() => {
-        health.status = 'DEGRADED';
-        health.redisStatus = 'DISCONNECTED';
-      });
-
-      res.json(health);
-    });
-
-    // Liveness probe
-    this.app.get('/live', (req, res) => {
-      res.status(200).send('OK');
-    });
-
-    // Readiness probe
-    this.app.get('/ready', async (req, res) => {
+  async connectKafka(retries = 5, delay = 5000) {
+    for (let i = 0; i < retries; i++) {
       try {
-        await redis.ping();
-        if (this.producer?.isConnected()) {
-          res.status(200).send('OK');
-        } else {
-          res.status(503).send('Not Ready');
-        }
+        console.log(`Attempting to connect to Kafka (attempt ${i + 1}/${retries})`);
+        this.producer = kafka.producer();
+        await this.producer.connect();
+        console.log('Successfully connected to Kafka');
+        return;
       } catch (error) {
-        res.status(503).send('Not Ready');
-      }
-    });
-  }
-
-
-  setupSessionReplication() {
-    // Subscribe to session replication channel
-    const subscriber = redis.duplicate();
-    subscriber.subscribe('session:replication', (err) => {
-      if (err) console.error('Error subscribing to session replication:', err);
-    });
-
-    subscriber.on('message', (channel, message) => {
-      if (channel === 'session:replication') {
-        try {
-          const session = JSON.parse(message);
-          if (session.serverId !== process.pid) {
-            this.sessionStore.set(session.userId, session);
-          }
-        } catch (error) {
-          console.error('Error processing replicated session:', error);
+        console.error(`Failed to connect to Kafka (attempt ${i + 1}/${retries}):`, error.message);
+        if (i < retries - 1) {
+          console.log(`Retrying in ${delay / 1000} seconds...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          throw error;
         }
       }
-    });
-  }
-
-  async replicateSession(userId, sessionData) {
-    try {
-      await redis.publish('session:replication', JSON.stringify({
-        serverId: process.pid,
-        userId,
-        ...sessionData
-      }));
-    } catch (error) {
-      console.error('Error replicating session:', error);
     }
   }
 
-
   async start() {
     try {
-      // Ensure Kafka topics exist
-      await createTopics();
+      // Wait for Kafka connection
+      await this.connectKafka();
 
-      // Initialize Kafka producer
-      this.producer = kafka.producer();
-      await this.producer.connect();
-      console.log('Connected to Kafka');
-
-      // Start WebSocket server
+      // Initialize WebSocket server
       this.wss = new WebSocketServer({
-        port: process.env.PORT || 8080,
+        port: this.port,
         perMessageDeflate: false
       });
 
+      console.log(`WebSocket server is listening on port ${this.port}`);
+
       this.setupWebSocketHandlers();
-      console.log(`WebSocket server started on port ${process.env.PORT || 8080}`);
     } catch (error) {
       console.error('Error starting server:', error);
       throw error;
@@ -190,53 +118,6 @@ class SocketServer {
     }
   }
 
-  async handleDraw(ws, data) {
-    if (!ws.roomId || !ws.userId) {
-      return this.sendError(ws, 'Not joined to a room');
-    }
-
-    console.log('Received draw event:', data);
-
-    const drawEvent = {
-      type: 'draw',
-      userId: ws.userId,
-      roomId: ws.roomId,
-      coordinates: data.coordinates,
-      timestamp: Date.now()
-    };
-
-    try {
-      // Store in Redis
-      const redisKey = `room:${ws.roomId}:state`;
-      const eventKey = `draw:${drawEvent.timestamp}`;
-      console.log('Storing in Redis:', redisKey, eventKey);
-
-      await redis.hset(
-        redisKey,
-        eventKey,
-        JSON.stringify(drawEvent.coordinates)
-      );
-      console.log('Successfully stored in Redis');
-
-      // Send to Kafka
-      console.log('Sending to Kafka');
-      await this.producer.send({
-        topic: 'whiteboard-events',
-        messages: [{
-          key: String(ws.roomId),
-          value: JSON.stringify(drawEvent)
-        }]
-      });
-      console.log('Successfully sent to Kafka');
-
-      // Broadcast to room
-      this.broadcastToRoom(ws.roomId, drawEvent, ws);
-    } catch (error) {
-      console.error('Error processing draw event:', error);
-      this.sendError(ws, 'Failed to process draw event');
-    }
-  }
-
   async handleJoin(ws, data) {
     if (!data.roomId || !data.userId) {
       return this.sendError(ws, 'Missing roomId or userId');
@@ -296,38 +177,62 @@ class SocketServer {
       console.error('Error handling join:', error);
       this.sendError(ws, 'Failed to join room');
     }
-
-    // Add session replication
-    await this.replicateSession(data.userId, {
-      roomId: data.roomId,
-      joinedAt: Date.now()
-    });
   }
-  async handleLeave(ws) {
+
+  async handleDraw(ws, data) {
+    if (!ws.roomId || !ws.userId) {
+      return this.sendError(ws, 'Not joined to a room');
+    }
+
+    console.log('Received draw event:', data);
+
+    const drawEvent = {
+      type: 'draw',
+      userId: ws.userId,
+      roomId: ws.roomId,
+      coordinates: data.coordinates,
+      timestamp: Date.now()
+    };
+
+    try {
+      // Store in Redis
+      const redisKey = `room:${ws.roomId}:state`;
+      const eventKey = `draw:${drawEvent.timestamp}`;
+      console.log('Storing in Redis:', redisKey, eventKey);
+
+      await redis.hset(
+        redisKey,
+        eventKey,
+        JSON.stringify(drawEvent.coordinates)
+      );
+      console.log('Successfully stored in Redis');
+
+      // Send to Kafka
+      console.log('Sending to Kafka');
+      await this.producer.send({
+        topic: 'whiteboard-events',
+        messages: [{
+          key: String(ws.roomId),
+          value: JSON.stringify(drawEvent)
+        }]
+      });
+      console.log('Successfully sent to Kafka');
+
+      // Broadcast to room
+      this.broadcastToRoom(ws.roomId, drawEvent, ws);
+    } catch (error) {
+      console.error('Error processing draw event:', error);
+      this.sendError(ws, 'Failed to process draw event');
+    }
+  }
+
+  handleLeave(ws) {
     if (ws.roomId) {
       const room = this.rooms.get(ws.roomId);
       if (room) {
         room.delete(ws);
         if (room.size === 0) {
           this.rooms.delete(ws.roomId);
-        }
-
-        // Send leave event to Kafka
-        try {
-          await this.producer.send({
-            topic: 'whiteboard-events',
-            messages: [{
-              key: String(ws.roomId),
-              value: JSON.stringify({
-                type: 'leave',
-                roomId: ws.roomId,
-                userId: ws.userId,
-                timestamp: Date.now()
-              })
-            }]
-          });
-        } catch (error) {
-          console.error('Error sending leave event to Kafka:', error);
         }
       }
     }
@@ -373,30 +278,11 @@ class SocketServer {
   }
 }
 
-// Start the server based on cluster configuration
-if (cluster.isPrimary) {
-  console.log(`Primary ${process.pid} is running`);
-
-  // Fork workers based on CPU cores
-  const numCPUs = cpus().length;
-  for (let i = 0; i < numCPUs; i++) {
-    cluster.fork();
-  }
-
-  cluster.on('exit', (worker, code, signal) => {
-    console.log(`Worker ${worker.process.pid} died`);
-    // Fork a new worker if one dies
-    cluster.fork();
-  });
-} else {
-  // Workers can share any TCP connection
-  // In this case, it's a WebSocket server
-  const port = parseInt(process.env.PORT || '8080') + cluster.worker.id - 1;
-  const server = new SocketServer(port);
-  server.start().catch(error => {
-    console.error('Failed to start server:', error);
-    process.exit(1);
-  });
-}
+// Create and start server
+const server = new SocketServer();
+server.start().catch(error => {
+  console.error('Failed to start server:', error);
+  process.exit(1);
+});
 
 export default SocketServer;

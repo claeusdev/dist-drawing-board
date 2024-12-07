@@ -1,38 +1,13 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useCallback, useRef, useState } from 'react';
 
 const Whiteboard = ({ roomId = 1, userId = 1 }) => {
   const canvasRef = useRef(null);
+  const wsRef = useRef(null);
   const [isDrawing, setIsDrawing] = useState(false);
-  const [ws, setWs] = useState(null);
   const [coordinates, setCoordinates] = useState({ x: 0, y: 0 });
-
-  useEffect(() => {
-    const socket = new WebSocket('ws://localhost:8080');
-
-    console.log({ socket })
-    socket.onopen = () => {
-      console.log('Connected to WebSocket server');
-      socket.send(JSON.stringify({
-        type: 'join',
-        roomId,
-        userId
-      }));
-    };
-
-    socket.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          handleServerMessage(data);
-        } catch (err) {
-          console.error('Error processing server message:', err);
-        }
-      };
-    setWs(socket);
-
-    return () => {
-      socket.close();
-    };
-  }, [roomId, userId]);
+  const [isConnected, setIsConnected] = useState(false);
+  const reconnectAttempts = useRef(0);
+  const maxReconnectAttempts = 5;
 
   const handleServerMessage = (data) => {
     switch (data.type) {
@@ -48,15 +23,71 @@ const Whiteboard = ({ roomId = 1, userId = 1 }) => {
     }
   };
 
+  const connectWebSocket = useCallback(() => {
+    console.log('Attempting to connect to WebSocket...');
+    const ws = new WebSocket('ws://localhost:8000');
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      console.log('Connected to WebSocket server');
+      setIsConnected(true);
+      reconnectAttempts.current = 0;
+
+      // Join room
+      ws.send(JSON.stringify({
+        type: 'join',
+        roomId,
+        userId
+      }));
+    };
+
+    ws.onclose = () => {
+      console.log('Disconnected from WebSocket server');
+      setIsConnected(false);
+
+      // Attempt to reconnect
+      if (reconnectAttempts.current < maxReconnectAttempts) {
+        reconnectAttempts.current += 1;
+        const timeout = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 10000);
+        console.log(`Attempting to reconnect in ${timeout}ms...`);
+        setTimeout(connectWebSocket, timeout);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        handleServerMessage(data);
+      } catch (err) {
+        console.error('Error processing server message:', err);
+      }
+    };
+  }, [roomId, userId]);
+
+  useEffect(() => {
+    connectWebSocket();
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
+  }, [connectWebSocket, roomId, userId]);
+
+
   const applyInitialState = (events) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     const ctx = canvas.getContext('2d');
-    
+
     // Clear the canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
+
     // Replay all events in order
     events.forEach(event => {
       if (event.type === 'draw') {
@@ -99,7 +130,7 @@ const Whiteboard = ({ roomId = 1, userId = 1 }) => {
     drawLine(newCoordinates);
     setCoordinates({ x: offsetX, y: offsetY });
 
-    ws.send(JSON.stringify({
+    wsRef.current.send(JSON.stringify({
       type: 'draw',
       roomId,
       userId,
