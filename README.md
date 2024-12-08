@@ -43,6 +43,7 @@ Edit the configuration files in the `config/` directory to customize:
 
 Kubernetes manifests are provided in the `kubernetes/` directory for container orchestration.
 
+```yaml
 // docker-compose.yml
 version: '3.8'
 services:
@@ -107,3 +108,4 @@ services:
 volumes:
   redis_data:
   mongodb_data:
+```
