@@ -56,20 +56,14 @@ services:
       - whiteboard_net
 
   redis-master:
-      image: redis:latest
-      container_name: redis-master  # Explicitly set container name
-      ports:
-        - "6379:6379"
-      networks:
-        - whiteboard_net
-      volumes:
-        - redis_data:/data
-      command: redis-server --appendonly yes
-      healthcheck:
-        test: ["CMD", "redis-cli", "ping"]
-        interval: 10s
-        timeout: 5s
-        retries: 5
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    networks:
+      - whiteboard_net
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
 
   zookeeper:
     image: confluentinc/cp-zookeeper:latest

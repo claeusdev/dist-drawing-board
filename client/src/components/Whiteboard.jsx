@@ -61,6 +61,8 @@ const Whiteboard = ({ roomId = 1, userId = 1 }) => {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        console.log("logging")
+        console.log({ data })
         handleServerMessage(data);
       } catch (err) {
         console.error('Error processing server message:', err);

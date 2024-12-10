@@ -2,7 +2,7 @@ import { MongoClient } from 'mongodb';
 import { kafka } from '../config/kafka.js';
 
 class StorageService {
-constructor() {
+    constructor() {
         this.mongodb = null;
         this.db = null;
         this.consumer = null;
@@ -18,7 +18,7 @@ constructor() {
             console.log('Successfully connected to MongoDB');
 
             console.log('Connecting to Kafka...');
-            this.consumer = kafka.consumer({ 
+            this.consumer = kafka.consumer({
                 groupId: 'storage-service'
             });
             await this.consumer.connect();
@@ -26,7 +26,7 @@ constructor() {
 
             // Subscribe to whiteboard events
             console.log('Subscribing to whiteboard-events topic...');
-            await this.consumer.subscribe({ 
+            await this.consumer.subscribe({
                 topic: 'whiteboard-events',
                 fromBeginning: true
             });
@@ -50,7 +50,7 @@ constructor() {
                         offset: message.offset,
                         value: message.value.toString()
                     });
-                    
+
                     try {
                         const event = JSON.parse(message.value.toString());
                         console.log('Processing event:', event.type);
@@ -72,7 +72,7 @@ constructor() {
     async processEvent(event) {
         try {
             console.log(`Storing event of type ${event.type} for room ${event.roomId}`);
-            
+
             // Store the raw event
             await this.db.collection('events').insertOne({
                 ...event,
@@ -101,8 +101,8 @@ constructor() {
             // Update room's last activity
             await this.db.collection('rooms').updateOne(
                 { roomId: event.roomId },
-                { 
-                    $set: { 
+                {
+                    $set: {
                         lastActivity: new Date(event.timestamp),
                         lastDrawEvent: event
                     },
@@ -128,8 +128,8 @@ constructor() {
         try {
             await this.db.collection('rooms').updateOne(
                 { roomId: event.roomId },
-                { 
-                    $set: { 
+                {
+                    $set: {
                         lastJoinActivity: new Date(event.timestamp)
                     },
                     $addToSet: { activeUsers: event.userId }
@@ -145,7 +145,7 @@ constructor() {
         try {
             await this.db.collection('rooms').updateOne(
                 { roomId: event.roomId },
-                { 
+                {
                     $pull: { activeUsers: event.userId },
                     $set: { lastLeaveActivity: new Date(event.timestamp) }
                 }
