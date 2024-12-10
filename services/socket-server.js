@@ -218,14 +218,46 @@ class SocketServer {
       });
       console.log('Successfully sent to Kafka');
 
-      // Broadcast to room
+      // Get updated state from Redis
+      const roomState = await redis.hgetall(redisKey);
+      const stateEvents = [];
+
+      for (const [eventKey, coordinates] of Object.entries(roomState)) {
+        const timestamp = parseInt(eventKey.split(':')[1]);
+        stateEvents.push({
+          type: 'draw',
+          coordinates: JSON.parse(coordinates),
+          timestamp
+        });
+      }
+
+      // Sort events by timestamp
+      stateEvents.sort((a, b) => a.timestamp - b.timestamp);
+
+      // Broadcast current state to all clients in the room
+      const room = this.rooms.get(ws.roomId);
+      if (room) {
+        room.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) {
+            try {
+              this.safeSend(client, {
+                type: 'init_state',
+                events: stateEvents
+              });
+            } catch (error) {
+              console.error('Error broadcasting state to client:', error);
+            }
+          }
+        });
+      }
+
+      // Also broadcast the individual draw event for real-time feedback
       this.broadcastToRoom(ws.roomId, drawEvent, ws);
     } catch (error) {
       console.error('Error processing draw event:', error);
       this.sendError(ws, 'Failed to process draw event');
     }
   }
-
   handleLeave(ws) {
     if (ws.roomId) {
       const room = this.rooms.get(ws.roomId);
