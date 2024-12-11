@@ -7,4 +7,3 @@ const client = new MongoClient(url, {
 });
 
 export default client;
-
