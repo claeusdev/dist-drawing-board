@@ -5,9 +5,11 @@ import { EventEmitter } from 'events';
 class PresenceService extends EventEmitter {
 	constructor() {
 		super();
+		super();
 		this.redis = new Redis({
-			host: 'localhost',
+			host: process.env.REDIS_HOST || 'redis-master',  // Changed from localhost
 			port: 6379,
+			password: process.env.REDIS_PASSWORD || 'redispass',
 			retryStrategy: (times) => {
 				const delay = Math.min(times * 50, 2000);
 				return delay;
@@ -15,8 +17,9 @@ class PresenceService extends EventEmitter {
 		});
 
 		this.subscriberRedis = new Redis({
-			host: 'localhost',
-			port: 6379
+			host: process.env.REDIS_HOST || 'redis-master',  // Changed from localhost
+			port: 6379,
+			password: process.env.REDIS_PASSWORD || 'redispass'
 		});
 
 		this.kafka = new Kafka({
