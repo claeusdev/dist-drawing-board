@@ -1,7 +1,23 @@
 global:
   scrape_interval: 15s
+  evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: 'whiteboard'
+  - job_name: 'websocket-servers'
     static_configs:
-      - targets: ['localhost:8080']
+      - targets: 
+        - 'websocket1:9100'
+        - 'websocket2:9100'
+        - 'websocket3:9100'
+    metrics_path: '/metrics'
+
+  - job_name: 'haproxy'
+    static_configs:
+      - targets: ['haproxy:8404']
+    metrics_path: '/metrics'
+  - job_name: 'kafka'
+    static_configs:
+      - targets: ['kafka-exporter:9308']
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']

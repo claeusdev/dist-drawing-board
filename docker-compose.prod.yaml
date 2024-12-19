@@ -1,8 +1,8 @@
+# docker-compose.prod.yml
 version: '3.8'
 services:
   haproxy:
     image: haproxy:2.4
-    container_name: haproxy
     ports:
       - "8000:8000"
       - "8404:8404"
@@ -16,7 +16,7 @@ services:
       - whiteboard_net
 
   websocket1:
-    build: .
+    image: gcr.io/whiteboard-445202/websocket:latest
     environment:
       - PORT=8081
       - HOST=0.0.0.0
@@ -28,13 +28,11 @@ services:
         condition: service_healthy
       redis-master:
         condition: service_started
-    labels:
-      service_name: "websocket1"
     networks:
       - whiteboard_net
 
   websocket2:
-    build: .
+    image: gcr.io/whiteboard-445202/websocket:latest
     environment:
       - PORT=8082
       - HOST=0.0.0.0
@@ -46,46 +44,34 @@ services:
         condition: service_healthy
       redis-master:
         condition: service_started
-    labels:
-      service_name: "websocket2"
     networks:
       - whiteboard_net
 
   websocket3:
-    build: .
+    image: gcr.io/whiteboard-445202/websocket:latest
     environment:
       - PORT=8083
-      - REDIS_HOST=redis-master
       - HOST=0.0.0.0
       - METRICS_PORT=9100
+      - REDIS_HOST=redis-master
       - KAFKA_BROKERS=kafka:9092
     depends_on:
       kafka:
         condition: service_healthy
       redis-master:
         condition: service_started
-    labels:
-      service_name: "websocket3"
     networks:
       - whiteboard_net
 
   redis-master:
-      image: redis:latest
-      container_name: redis-master  # Explicitly set container name
-      ports:
-        - "6379:6379"
-      networks:
-        - whiteboard_net
-      volumes:
-        - redis_data:/data
-      labels:
-        service_name: "redis-master"
-      command: redis-server --appendonly yes
-      healthcheck:
-        test: ["CMD", "redis-cli", "ping"]
-        interval: 10s
-        timeout: 5s
-        retries: 5
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - whiteboard_net
 
   zookeeper:
     image: confluentinc/cp-zookeeper:latest
@@ -96,18 +82,11 @@ services:
       - "2181:2181"
     networks:
       - whiteboard_net
-    healthcheck:
-      test: echo srvr | nc localhost 2181 || exit 1
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   kafka:
     image: confluentinc/cp-kafka:latest
-    container_name: kafka
     depends_on:
-      zookeeper:
-        condition: service_healthy
+      - zookeeper
     ports:
       - "9092:9092"
       - "29092:29092"
@@ -119,16 +98,8 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
     networks:
       - whiteboard_net
-    labels:
-      service_name: "kafka"
-    healthcheck:
-      test: kafka-topics --bootstrap-server localhost:9092 --list || exit 1
-      interval: 30s
-      timeout: 10s
-      retries: 5
 
   kafka-exporter:
     image: danielqsj/kafka-exporter:latest
@@ -136,8 +107,6 @@ services:
       - --kafka.server=kafka:9092
     ports:
       - "9308:9308"
-    depends_on:
-      - kafka
     networks:
       - whiteboard_net
 
@@ -163,9 +132,6 @@ services:
     image: grafana/grafana:latest
     ports:
       - "3000:3000"
-    depends_on:
-      - prometheus
-      - loki
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_SECURITY_ADMIN_USER=admin
@@ -175,6 +141,7 @@ services:
       - ./monitoring/grafana-datasources:/etc/grafana/provisioning/datasources
     networks:
       - whiteboard_net
+
   loki:
     image: grafana/loki:latest
     ports:
@@ -182,26 +149,24 @@ services:
     volumes:
       - ./config/loki.yaml:/etc/loki/local-config.yaml
       - loki_data:/loki
-    command: -config.file=/etc/loki/local-config.yaml -config.expand-env=true
+    command: -config.file=/etc/loki/local-config.yaml
     networks:
       - whiteboard_net
+
   promtail:
     image: grafana/promtail:latest
     volumes:
       - ./config/promtail.yaml:/etc/promtail/config.yml
-      # Mount docker socket and container logs
       - /var/run/docker.sock:/var/run/docker.sock
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
     command: -config.file=/etc/promtail/config.yml
     networks:
       - whiteboard_net
-    depends_on:
-      - loki
+
 networks:
   whiteboard_net:
     driver: bridge
 
 volumes:
   redis_data:
-  grafana_data:
   loki_data:

@@ -1,6 +1,9 @@
 import WebSocket, { WebSocketServer } from 'ws';
+import express from "express"
 import { kafka } from '../config/kafka.js';
 import { redis } from '../config/redis.js';
+import { Gauge, Counter, Histogram, collectDefaultMetrics, register as _register } from 'prom-client';
+
 
 class SocketServer {
   constructor() {
@@ -8,6 +11,69 @@ class SocketServer {
     this.wss = null;
     this.port = process.env.PORT || 8080;
     this.rooms = new Map();
+    this.metrics = {
+      // Connection tracking
+      activeConnections: new Gauge({
+        name: 'ws_active_connections',
+        help: 'Number of active WebSocket connections'
+      }),
+
+      // Message counters
+      messagesSent: new Counter({
+        name: 'ws_messages_sent_total',
+        help: 'Total number of WebSocket messages sent'
+      }),
+      messagesReceived: new Counter({
+        name: 'ws_messages_received_total',
+        help: 'Total number of WebSocket messages received'
+      }),
+
+      // Draw events
+      drawEvents: new Counter({
+        name: 'ws_draw_events_total',
+        help: 'Total number of draw events processed'
+      }),
+
+      // Latency tracking 
+      kafkaPublishLatency: new Histogram({
+        name: 'ws_kafka_publish_duration_seconds',
+        help: 'Latency of publishing messages to Kafka',
+        buckets: [0.1, 0.5, 1, 2, 5]
+      }),
+      redisUpdateLatency: new Histogram({
+        name: 'ws_redis_update_duration_seconds',
+        help: 'Latency of updating Redis state',
+        buckets: [0.1, 0.5, 1, 2, 5]
+      })
+    };
+  }
+
+  // Metrics endpoint setup:
+  startMetricsServer() {
+    console.log('Starting metrics server...');
+    const app = express();
+
+    // Enable default metrics (GC, memory, etc)
+    collectDefaultMetrics();
+
+    app.get('/metrics', async (req, res) => {
+      try {
+        res.set('Content-Type', _register.contentType);
+        const metrics = await _register.metrics();
+        res.end(metrics);
+      } catch (err) {
+        res.status(500).end(err);
+      }
+    });
+
+    app.get('/health', (req, res) => {
+      res.status(200).send('OK');
+    });
+
+    this.metricsServer = app.listen(
+      process.env.METRICS_PORT || 9100,
+      "0.0.0.0"
+    );
   }
 
   async connectKafka(retries = 5, delay = 5000) {
@@ -42,6 +108,8 @@ class SocketServer {
       });
 
       console.log(`WebSocket server is listening on port ${this.port}`);
+
+      this.startMetricsServer()
 
       this.setupWebSocketHandlers();
     } catch (error) {
@@ -276,6 +344,25 @@ class SocketServer {
       }
     });
   }
+
+  async stop() {
+    // Close WebSocket server
+    if (this.wss) {
+      await new Promise(resolve => this.wss.close(resolve));
+    }
+
+    // Close metrics server
+    if (this.metricsServer) {
+      await new Promise(resolve => this.metricsServer.close(resolve));
+    }
+
+    // Disconnect Kafka producer
+    if (this.producer) {
+      await this.producer.disconnect();
+    }
+
+    console.log('Server shutdown complete');
+  }
 }
 
 // Create and start server
@@ -283,6 +370,19 @@ const server = new SocketServer();
 server.start().catch(error => {
   console.error('Failed to start server:', error);
   process.exit(1);
+});
+
+// Add proper signal handling
+process.on('SIGTERM', async () => {
+  console.log('Received SIGTERM signal. Starting graceful shutdown...');
+  await server.stop();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('Received SIGINT signal. Starting graceful shutdown...');
+  await server.stop();
+  process.exit(0);
 });
 
 export default SocketServer;
